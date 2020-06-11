@@ -12,13 +12,15 @@ const no = require('gun/lib/nomem')(); // no-memory storage adapter for RAD
 require("gun/sea");
 require("gun/lib/then");
 const SEA = Gun.SEA;
+//experiment begins
+Gun.on('create', context);
 const http = require("http");
 const https = require("https");
 const WebSocket = require("ws");
-let debug = process.env.DEBUG || false;
-let relaypeers = process.env.RELAY || 'https://mirror.rig.airfaas.com/'; // FOR FUTURE DAISY-CHAINING (see hyperswarm to connect guns)
+let debug = process.env.DEBUG || true;
+let relaypeers = process.env.RELAY /*|| 'https://mirror.rig.airfaas.com/'*/; // FOR FUTURE DAISY-CHAINING (see hyperswarm to connect guns)
 let config = {};
-if(debug) console.log(SEA, Gun.SEA);
+//if(debug) console.log(SEA, Gun.SEA);
 config.options = {
 }
 if (!process.env.hasOwnProperty('SSL')||process.env.SSL == false) {
@@ -35,11 +37,13 @@ let sigs ={};
 // LRU with last used sockets
 const QuickLRU = require("quick-lru");
 const lru = new QuickLRU({ maxSize: 100, onEviction: false });
+var __gun;
 
 server.on("upgrade", async function(request, socket, head) {
+  debugger;
   let parsed = url.parse(request.url,true);
   if(debug) console.log("parsed",parsed);
-  let sig = parsed.query && parsed.query.sig ? parsed.query.sig : false; 
+  let sig = parsed.query && parsed.query.sig ? parsed.query.sig : false;
   let creator = parsed.query && parsed.query.creator ? parsed.query.creator  : "server";
   let pathname = parsed.pathname || "/gun";
   pathname = pathname.replace(/^\/\//g,'/');
@@ -47,7 +51,7 @@ server.on("upgrade", async function(request, socket, head) {
 
   var gun = { gun: false, server: false };
   if (pathname) {
-    let roomname = pathname.split("").slice(1).join(""); 
+    let roomname = pathname.split("").slice(1).join("");
     if(debug) console.log("roomname",roomname);
     if (lru.has(pathname)) {
       // Existing Node
@@ -67,7 +71,7 @@ server.on("upgrade", async function(request, socket, head) {
       let relaypath = roomname+'?'+qs;
       let peers = []; //relaypeers.split(',').map(function(p){ return p+relaypath; });
       if(debug) console.log("peers",peers);
-      const g = gun.gun = Gun({
+      const g = gun.gun = __gun = Gun({
         peers: peers, // should we use self as peer?
         localStorage: false,
         store: no,
@@ -128,3 +132,79 @@ server.on("upgrade", async function(request, socket, head) {
     socket.destroy();
   }
 });
+
+function context (context) {
+  if(debug) console.log("message catcher is called")
+  context.on('in', handleMessage);
+  //this.to.next(context);
+  var opt = context.opt || {};
+  var ws = opt.ws || (opt.ws = {}), batch;
+  if(opt.web){
+		ws.server = ws.server || opt.web;
+		ws.path = ws.path || '/gun';
+
+		if (!ws.web) ws.web = new WebSocket.Server(ws);
+
+		ws.web.on('connection', function(wire){
+			wire.upgradeReq = wire.upgradeReq || {};
+			wire.url = url.parse(wire.upgradeReq.url||'', true);
+			wire.id = wire.id || Gun.text.random(6);
+			var peer = opt.peers[wire.id] = {wire: wire};
+			wire.peer = function(){ return peer };
+			context.on('hi', peer);
+
+			wire.on('message', async function(msg){
+        debugger;
+				console.log("MESSAGE", msg);
+        console.log("type", msg.length);
+        var peerList = Object.keys(context.opt.peers);
+        for(let i=0;i<peerList.length;i++) {
+      		gun._.opt.peers[peerList[i]].wire.send(msg);
+          console.log(`sent to ${peerList[i]}`);
+      		}
+			});
+
+			wire.on('close', function(){
+				context.on('bye', peer);
+				Gun.obj.del(opt.peers, wire.id);
+			});
+
+			wire.on('error', function(e){});
+
+      opt.open= function (peer, as){
+    		if(!peer || !peer.url){ return }
+    		var url = peer.url.replace('http', 'ws');
+    		var wire = peer.wire = new WebSocket(url);
+    		wire.on('close', function(){
+    			reconnect(peer, as);
+    		});
+    		wire.on('error', function(error){
+    			if(!error){ return }
+    			if(error.code === 'ECONNREFUSED'){
+    				reconnect(peer, as); // placement?
+    			}
+    		});
+    		wire.on('open', function(){
+          console.log('opened connection to peer', peer)
+    			var queue = peer.queue;
+    			peer.queue = [];
+    			Gun.obj.map(queue, function(msg){
+    				batch = msg;
+    				send.call(as, peer);
+    			});
+    		});
+    		wire.on('message', function(msg){
+          debugger;
+          console.log('wire message:', msg)
+    			receive(msg, wire, as); // diff: wire not peer!
+    		});
+    		return wire;
+    	}
+		});
+  }
+}
+
+function handleMessage (msg) {
+  console.log('received', msg)
+  __gun.on('out', msg)
+}
